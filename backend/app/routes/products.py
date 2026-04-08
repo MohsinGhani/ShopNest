@@ -1,8 +1,10 @@
 from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, joinedload
+from sqlalchemy import func
+from collections import Counter
 from ..database import get_db
 from .. import crud, schemas, models
-from ..auth import require_admin
+from ..auth import require_admin, get_current_user
 
 router = APIRouter(prefix="/products", tags=["products"])
 
@@ -94,3 +96,79 @@ def remove_image(
 ):
     if not crud.delete_product_image(db, image_id):
         raise HTTPException(status_code=404, detail="Image not found")
+
+
+@router.get("/recommendations/personalized", response_model=list[schemas.ProductOut])
+def get_personalized_recommendations(
+    db: Session = Depends(get_db),
+    user: models.User = Depends(get_current_user),
+):
+    """
+    Return personalized product recommendations based on the user's order history.
+    Analyzes which categories the user orders from most, then returns products
+    from those categories (excluding already-purchased products).
+    Falls back to featured/newest products if no order history.
+    """
+    # Get all the user's order items with product info
+    order_items = (
+        db.query(models.OrderItem)
+        .join(models.Order, models.OrderItem.order_id == models.Order.id)
+        .filter(models.Order.user_id == user.id)
+        .options(joinedload(models.OrderItem.product))
+        .all()
+    )
+
+    if not order_items:
+        # No order history — fall back to featured products
+        products, _ = crud.get_products(db, limit=8, featured_only=True)
+        if len(products) < 4:
+            more, _ = crud.get_products(db, limit=8, sort="newest")
+            seen = {p.id for p in products}
+            for p in more:
+                if p.id not in seen:
+                    products.append(p)
+                    seen.add(p.id)
+                if len(products) >= 8:
+                    break
+        return products
+
+    # Count category frequency from orders (weighted by quantity)
+    category_counter: Counter = Counter()
+    purchased_product_ids: set[int] = set()
+    for oi in order_items:
+        purchased_product_ids.add(oi.product_id)
+        if oi.product and oi.product.category_id:
+            category_counter[oi.product.category_id] += oi.quantity
+
+    # Get top categories (up to 3)
+    top_categories = [cat_id for cat_id, _ in category_counter.most_common(3)]
+
+    # Fetch products from those categories, excluding already purchased
+    recommendations: list[models.Product] = []
+    seen_ids: set[int] = set()
+
+    for cat_id in top_categories:
+        products, _ = crud.get_products(
+            db, limit=6, category_id=cat_id, sort="newest"
+        )
+        for p in products:
+            if p.id not in purchased_product_ids and p.id not in seen_ids:
+                recommendations.append(p)
+                seen_ids.add(p.id)
+
+    # If we don't have enough, fill with featured/newest
+    if len(recommendations) < 8:
+        featured, _ = crud.get_products(db, limit=8, featured_only=True)
+        for p in featured:
+            if p.id not in purchased_product_ids and p.id not in seen_ids:
+                recommendations.append(p)
+                seen_ids.add(p.id)
+
+    if len(recommendations) < 4:
+        newest, _ = crud.get_products(db, limit=8, sort="newest")
+        for p in newest:
+            if p.id not in seen_ids:
+                recommendations.append(p)
+                seen_ids.add(p.id)
+
+    return recommendations[:8]

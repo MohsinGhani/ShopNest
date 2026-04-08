@@ -4,7 +4,8 @@ Each tool queries the real database and returns a plain-text result
 that the agent brain can use to compose its final answer.
 """
 
-from sqlalchemy.orm import Session
+from datetime import datetime, timedelta, timezone
+from sqlalchemy.orm import Session, joinedload
 from .. import crud, models
 
 
@@ -15,6 +16,7 @@ TOOL_DESCRIPTIONS = {
     "get_product_details": "Get detailed info about a specific product by ID. Input: product_id (int).",
     "get_recommendations": "Get top-rated and featured product recommendations. Input: optional category name.",
     "compare_prices": "Compare prices of products matching a search term. Input: search query string.",
+    "get_user_orders": "Get the authenticated user's order history. Input: optional time_filter ('today', 'this_week', 'last_week', 'this_month', 'last_month', 'all'). Requires user_id.",
 }
 
 TOOL_NAMES = set(TOOL_DESCRIPTIONS.keys())
@@ -156,8 +158,78 @@ def compare_prices(db: Session, query: str) -> str:
     return "\n".join(lines)
 
 
+def get_user_orders(db: Session, user_id: int | None, time_filter: str = "all") -> str:
+    """Get the user's order history with optional time filtering."""
+    if not user_id:
+        return "You need to be signed in to view your orders. Please log in first."
+
+    now = datetime.now(timezone.utc)
+
+    # Determine date cutoff based on filter
+    date_cutoff = None
+    filter_label = "all time"
+    if time_filter == "today":
+        date_cutoff = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        filter_label = "today"
+    elif time_filter == "this_week":
+        date_cutoff = now - timedelta(days=now.weekday())
+        date_cutoff = date_cutoff.replace(hour=0, minute=0, second=0, microsecond=0)
+        filter_label = "this week"
+    elif time_filter == "last_week":
+        start_of_this_week = now - timedelta(days=now.weekday())
+        start_of_this_week = start_of_this_week.replace(hour=0, minute=0, second=0, microsecond=0)
+        date_cutoff = start_of_this_week - timedelta(days=7)
+        filter_label = "last week"
+    elif time_filter == "this_month":
+        date_cutoff = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+        filter_label = "this month"
+    elif time_filter == "last_month":
+        first_of_month = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+        date_cutoff = (first_of_month - timedelta(days=1)).replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+        filter_label = "last month"
+
+    # Query orders
+    query = (
+        db.query(models.Order)
+        .filter(models.Order.user_id == user_id)
+        .options(
+            joinedload(models.Order.items).joinedload(models.OrderItem.product)
+        )
+        .order_by(models.Order.created_at.desc())
+    )
+
+    if date_cutoff:
+        query = query.filter(models.Order.created_at >= date_cutoff)
+        # For "last_week", also cap at start of this week
+        if time_filter == "last_week":
+            start_of_this_week = now - timedelta(days=now.weekday())
+            start_of_this_week = start_of_this_week.replace(hour=0, minute=0, second=0, microsecond=0)
+            query = query.filter(models.Order.created_at < start_of_this_week)
+        # For "last_month", cap at start of this month
+        if time_filter == "last_month":
+            first_of_month = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+            query = query.filter(models.Order.created_at < first_of_month)
+
+    orders = query.limit(10).all()
+
+    if not orders:
+        return f"No orders found for {filter_label}."
+
+    lines = [f"Your orders ({filter_label}) — {len(orders)} order(s):\n"]
+    for order in orders:
+        date_str = order.created_at.strftime("%b %d, %Y") if order.created_at else "Unknown date"
+        lines.append(f"📦 Order #{order.id} — ${order.total_amount:.2f} — {date_str}")
+        for item in order.items:
+            product_name = item.product.name if item.product else f"Product #{item.product_id}"
+            lines.append(f"   • {product_name} × {item.quantity} — ${item.price:.2f} each")
+    
+    total_spent = sum(o.total_amount for o in orders)
+    lines.append(f"\nTotal spent ({filter_label}): ${total_spent:.2f}")
+    return "\n".join(lines)
+
+
 # ── Tool dispatcher ──────────────────────────────────────────────
-def execute_tool(db: Session, tool_name: str, tool_input: dict) -> str:
+def execute_tool(db: Session, tool_name: str, tool_input: dict, user_id: int | None = None) -> str:
     """Execute a tool by name with given inputs. Returns result string."""
     if tool_name not in TOOL_NAMES:
         return f"Unknown tool: {tool_name}"
@@ -180,6 +252,8 @@ def execute_tool(db: Session, tool_name: str, tool_input: dict) -> str:
             return get_recommendations(db, category=tool_input.get("category", ""))
         elif tool_name == "compare_prices":
             return compare_prices(db, query=tool_input.get("query", ""))
+        elif tool_name == "get_user_orders":
+            return get_user_orders(db, user_id=user_id, time_filter=tool_input.get("time_filter", "all"))
         else:
             return f"Tool '{tool_name}' is not implemented."
     except Exception as e:

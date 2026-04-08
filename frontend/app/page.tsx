@@ -13,11 +13,14 @@ import {
   SlidersHorizontal, Sparkles, TrendingUp, Clock, X,
 } from "lucide-react";
 import Link from "next/link";
+import { useAuth } from "@/lib/auth-context";
 import type { Product, PaginatedProducts, Category } from "@/types";
 
 export default function Home() {
+  const { user } = useAuth();
   const [products, setProducts] = useState<Product[]>([]);
   const [featured, setFeatured] = useState<Product[]>([]);
+  const [recommended, setRecommended] = useState<Product[]>([]);
   const [categories, setCategories] = useState<Category[]>([]);
   const [page, setPage] = useState(1);
   const [totalPages, setTotalPages] = useState(1);
@@ -41,6 +44,17 @@ export default function Home() {
       .then((data) => setFeatured(data.items))
       .catch(() => { });
   }, []);
+
+  // Load personalized recommendations when user is signed in
+  useEffect(() => {
+    if (user) {
+      apiFetch<Product[]>("/products/recommendations/personalized")
+        .then(setRecommended)
+        .catch(() => setRecommended([]));
+    } else {
+      setRecommended([]);
+    }
+  }, [user]);
 
   // Load products when filters/page change
   useEffect(() => {
@@ -119,6 +133,28 @@ export default function Home() {
           </Link>
         </div>
       </section>
+
+      {/* Recommended for You (personalized, shown when signed in) */}
+      {recommended.length > 0 && (
+        <>
+          <Separator className="my-4" />
+          <section className="py-8">
+            <div className="flex items-center gap-2 mb-6">
+              <TrendingUp className="size-5 text-primary" />
+              <h2 className="text-2xl font-bold">Recommended for You</h2>
+              <Badge variant="secondary" className="ml-2">Personalized</Badge>
+            </div>
+            <p className="text-muted-foreground text-sm mb-4">
+              Based on your order history
+            </p>
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-6">
+              {recommended.slice(0, 4).map((product) => (
+                <ProductCard key={product.id} product={product} />
+              ))}
+            </div>
+          </section>
+        </>
+      )}
 
       {/* Featured Products */}
       {featured.length > 0 && (

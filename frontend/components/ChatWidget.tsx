@@ -34,7 +34,7 @@ export default function ChatWidget() {
         {
             role: "assistant",
             content:
-                "Hi! 👋 I'm your **ShopNest AI Assistant**. I can help you find products, get recommendations, compare prices, and more.\n\nTry asking me something like:\n• \"Find laptops under $500\"\n• \"Show me categories\"\n• \"Best products\"\n• \"Compare headphones\"",
+                "Hi! 👋 I'm your **ShopNest AI Assistant**. I can help you find products, get recommendations, compare prices, and more.\n\nTry asking me something like:\n• \"Find laptops under $500\"\n• \"Show me categories\"\n• \"Best products\"\n• \"Compare headphones\"\n• \"Show my orders from this week\"\n• \"What did I order last month?\"",
         },
     ]);
     const [input, setInput] = useState("");

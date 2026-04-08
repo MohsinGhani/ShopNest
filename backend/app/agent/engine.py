@@ -23,6 +23,12 @@ INTENT_PATTERNS: list[tuple[str, list[str]]] = [
     ("help", [
         r"\b(help|what can you do|what do you do|how do you work|commands|assist)\b",
     ]),
+    ("my_orders", [
+        r"\b(my\s*orders?|order\s*history|past\s*orders?|previous\s*orders?|show\s*(?:me\s*)?orders?|recent\s*orders?)\b",
+        r"\b(orders?\s*(?:from|of|in|during|for)\s*(?:today|this\s*week|last\s*week|this\s*month|last\s*month|yesterday))\b",
+        r"\b(what\s*(?:did\s*)?i\s*(?:order|buy|purchase))\b",
+        r"\b(order\s*status|track\s*order|where.*(?:my|order))\b",
+    ]),
     ("category_browse", [
         r"\b(categories|category|what.*(?:types|kinds)|show.*categories|list.*categories)\b",
     ]),
@@ -126,12 +132,31 @@ def _extract_search_query(message: str) -> str:
     return msg
 
 
+def _extract_time_filter(message: str) -> str:
+    """Extract time filter from order-related queries."""
+    msg = message.lower()
+    if re.search(r"\btoday\b", msg):
+        return "today"
+    if re.search(r"\bthis\s*week\b", msg):
+        return "this_week"
+    if re.search(r"\blast\s*week\b", msg):
+        return "last_week"
+    if re.search(r"\bthis\s*month\b", msg):
+        return "this_month"
+    if re.search(r"\blast\s*month\b", msg):
+        return "last_month"
+    if re.search(r"\byesterday\b", msg):
+        return "today"  # close enough — will show recent
+    return "all"
+
+
 # ── Agent brain (decision maker) ────────────────────────────────
 
 def decide_next_action(
     message: str,
     history: list[dict[str, Any]],
     available_categories: list[str],
+    user_id: int | None = None,
 ) -> dict[str, Any]:
     """
     Decide the next action based on user message and history.
@@ -200,9 +225,19 @@ def decide_next_action(
                 "⭐ **Recommendations**: \"suggest something\", \"best products\"\n"
                 "💰 **Price filter**: \"laptops under $200\", \"items between $10 and $50\"\n"
                 "📊 **Compare**: \"compare phones\", \"cheapest laptops\"\n"
-                "📋 **Details**: \"tell me about product #5\", \"details on product 3\"\n\n"
+                "📋 **Details**: \"tell me about product #5\", \"details on product 3\"\n"
+                "🛒 **My Orders**: \"show my orders\", \"orders from today\", \"orders from last week\"\n\n"
                 "Just type naturally — I'll figure out what you need!"
             ),
+        }
+
+    if intent == "my_orders":
+        time_filter = _extract_time_filter(message)
+        return {
+            "action": "tool",
+            "tool_name": "get_user_orders",
+            "tool_input": {"time_filter": time_filter},
+            "reasoning": f"User wants to see their orders ({time_filter}).",
         }
 
     if intent == "category_browse":
@@ -274,7 +309,7 @@ MAX_STEPS = 4
 ALLOWED_TOOLS = set(TOOL_DESCRIPTIONS.keys())
 
 
-def run_agent(db: Session, message: str) -> dict[str, Any]:
+def run_agent(db: Session, message: str, user_id: int | None = None) -> dict[str, Any]:
     """
     Run the agent loop for a user message.
 
@@ -297,7 +332,7 @@ def run_agent(db: Session, message: str) -> dict[str, Any]:
     action_log: list[dict[str, Any]] = []
 
     for step in range(1, MAX_STEPS + 1):
-        decision = decide_next_action(message, history, cats)
+        decision = decide_next_action(message, history, cats, user_id=user_id)
 
         # Log the decision
         log_entry = {
@@ -329,7 +364,7 @@ def run_agent(db: Session, message: str) -> dict[str, Any]:
                 action_log.append(log_entry)
                 break
 
-            result = execute_tool(db, tool_name, tool_input)
+            result = execute_tool(db, tool_name, tool_input, user_id=user_id)
 
             log_entry["tool"] = tool_name
             log_entry["tool_input"] = tool_input
